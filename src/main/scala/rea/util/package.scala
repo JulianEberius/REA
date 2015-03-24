@@ -9,9 +9,18 @@ import scala.collection.mutable
 import rea.analysis.analyze
 import de.tudresden.matchtools.similarities.SetSimilarities
 import scala.annotation
+import java.text.SimpleDateFormat
+import java.util.Date
 
 package object util {
 
+  val df = new SimpleDateFormat("HH:mm:ss:SSS")
+
+  def fTime():String = fTime(System.currentTimeMillis)
+
+  def fTime(s:Long):String = {
+    df.format(new Date(s))
+  }
 
   def naturalTime(s:Int) = {
     if (s / 60 > 0)

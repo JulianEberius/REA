@@ -41,13 +41,6 @@ abstract trait Picker {
     		(wDiversity * divWith)
       tmp
     }
-        // (1.0 - completeness) * (cMat(i).sum / cMat.size)
-        // wCoverage * coverageScore +
-        // wCoherence * coherenceWith(i, selected) +
-        // wDiversity * diversityWith(iteration, i, coverable)// +
-       // (cMat(i).sum / cMat.size)
-      // val diversity = diversityWith(iteration, i, coverable)
-      // val scoreWithDiv = score * diversity
     else
       0.0
   }
@@ -336,7 +329,6 @@ abstract class GreedySetCoverer(k:Int, _entities: Seq[Int], _candidates: Seq[Dri
   protected def createCovers(iteration: Int, covers: List[Cover]): Seq[Cover] = {
     // stopping condition
     if (covers.size == maxCovers || iteration == maxIterations) {
-      println(s"finishing greedy*: ${covers.size}/${maxCovers} ${iteration}/${maxIterations}")
       return covers.reverse.toSeq
     }
 

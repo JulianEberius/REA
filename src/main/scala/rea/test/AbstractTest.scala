@@ -2,12 +2,13 @@ package rea.test
 
 import scala.Array.canBuildFrom
 import com.martiansoftware.jsap.{JSAP, JSAPResult, Switch, UnflaggedOption}
-import rea.REA
+import rea.{REA, REA2}
 import rea.definitions.Dataset
 import rea.definitions.DrilledValue
 import java.util.BitSet
 import rea.definitions.REARequest
 import rea.index.LocalIndex
+import rea.index.Index
 import rea.index.RemoteIndex
 import rea.definitions.DrilledDataset
 import rea.coherence.Coherence
@@ -47,6 +48,7 @@ trait REATest {
   val DEBUG = "debug"
   val ATTRIBUTE = "attribute"
   val CONCEPT = "concept"
+  val PREDICATES = "predicates"
   val NO_ENTITY_TABLES = "noEntityTables"
   val NUM_COVERS = "numCovers"
   val WARMUP = "warmUp"
@@ -56,8 +58,18 @@ trait REATest {
   val DATABASE_FILE = "dbFile"
   val NUM_INDEX_CANDIDATES = "numIndexCandidates"
   val SEARCH_SPACE_FACTOR = "searchSpaceFactor"
+  val FILTERED_API = "filteredApi"
+  val REA2 = "rea2"
+  val ANSWERS_DB = "answersFile"
+
 
   var config:JSAPResult
+
+  def createREA(index:Index, req:REARequest) =
+    if (config.getBoolean(REA2))
+        new REA2(index, req)
+    else
+        new REA(index, req)
 
   def getRawEntities(entitiesPath: String): Array[String] =
     if (entitiesPath == null)
@@ -116,6 +128,12 @@ trait REATest {
     jsap.registerParameter(new FlaggedOption(DATABASE_FILE).setLongFlag(DATABASE_FILE)
       .setRequired(false).setShortFlag('f').setDefault("results.db"))
 
+    jsap.registerParameter(new FlaggedOption(ANSWERS_DB).setLongFlag(ANSWERS_DB)
+      .setRequired(false).setShortFlag('j').setDefault("answers.db"))
+
+    jsap.registerParameter(new FlaggedOption(PREDICATES).setLongFlag(PREDICATES)
+      .setRequired(false).setShortFlag('r').setDefault(""))
+
     jsap.registerParameter(new FlaggedOption(NUM_COVERS).setLongFlag(NUM_COVERS)
       .setRequired(false).setShortFlag('n').setStringParser(JSAP.INTEGER_PARSER).setDefault("5"))
 
@@ -123,10 +141,13 @@ trait REATest {
       .setRequired(false).setShortFlag('u').setStringParser(JSAP.INTEGER_PARSER).setDefault("100"))
 
     jsap.registerParameter(new FlaggedOption(SEARCH_SPACE_FACTOR).setLongFlag(SEARCH_SPACE_FACTOR)
-      .setRequired(false).setShortFlag('s').setStringParser(JSAP.INTEGER_PARSER).setDefault("20"))
+      .setRequired(false).setShortFlag('s').setStringParser(JSAP.INTEGER_PARSER).setDefault("10"))
 
     jsap.registerParameter(new Switch(DEBUG)
       .setLongFlag(DEBUG).setShortFlag('d'))
+
+    jsap.registerParameter(new Switch(FILTERED_API)
+      .setLongFlag(FILTERED_API).setShortFlag('b'))
 
     jsap.registerParameter(new Switch(GUI)
       .setLongFlag(GUI).setShortFlag('g'))
@@ -136,6 +157,9 @@ trait REATest {
 
     jsap.registerParameter(new Switch(PRINT_COVERS)
       .setLongFlag(PRINT_COVERS).setShortFlag('p'))
+
+    jsap.registerParameter(new Switch(REA2)
+      .setLongFlag(REA2).setShortFlag('2'))
 
     jsap.parse(args)
   }
@@ -176,10 +200,10 @@ trait REATest {
       for ((c, i) <- covers.zipWithIndex) {
         out(s"$i)\n--")
         out(c.toString(entities))
-        out(c.coverage(coverer.numEntities))
-        out(c.inherentScore)
-        out(c.consistency(coverer.cMat))
-        out(matrixToString(consistencyMatrix(c, coverer)))
+        out("cov: " + c.coverage(coverer.numEntities))
+        out("score: " + c.inherentScore)
+        out("cons: " + c.consistency(coverer.cMat))
+        // out(matrixToString(consistencyMatrix(c, coverer)))
         // out(c.datasets.map(d => d.scores.toString + "\n" +
         //   s"(${d.scores.attSim} + ${d.scores.entitySim} * 0.9 + ${d.scores.conceptSim} * 0.25 + ${d.scores.termSim} * 0.25 + ${d.scores.titleSim} * 0.25 + ${d.scores.coverageA} + ${d.scores.coverageB} * 0.5  + ${d.scores.domainPopularity} * 0.8)"+
         //   "\n" + s"${d.scores.score} + ${d.scores.inherentScore}").mkString("\n"))
@@ -233,8 +257,8 @@ trait REATest {
 
   def matchResultStorageKey(req:REARequest):String =
     req.entityTables match {
-      case true => s"""${req.concept.mkString("|")}-${req.attribute.mkString("|")}-${req.entities.mkString("|")}-${req.numResults}"""
-      case false => s"""${req.concept.mkString("|")}-${req.attribute.mkString("|")}-${req.entities.mkString("|")}-${req.numResults}-noEntityTables"""
+      case true => s"""${req.concept.mkString("|")}-${req.attribute.mkString("|")}-${req.entities.mkString("|")}-${req.numResults}-${req.predicates}"""
+      case false => s"""${req.concept.mkString("|")}-${req.attribute.mkString("|")}-${req.entities.mkString("|")}-${req.numResults}-${req.predicates}-noEntityTables"""
     }
 
   def storeMatchResults(req:REARequest, results:Seq[DrilledDataset]) = {
@@ -354,8 +378,6 @@ class ResultStore(dbFile:String) {
     thCov real,
     scale integer,
     retrievalRunTime real);""")
-
-  // stat.executeUpdate("""create table if not exists outputs (id integer, output text);""")
 
   stat.executeUpdate("""create table if not exists covers (
     id integer,
@@ -537,10 +559,6 @@ class CorrectnessStore(dbFile:String) {
     forAttribute text,
     entity text,
     correct integer);""")
-  stat.executeUpdate("""create table if not exists tags (
-    identifier text,
-    forAttribute text,
-    tag text);""")
   stat.executeUpdate("""create table if not exists tags (
     identifier text,
     forAttribute text,

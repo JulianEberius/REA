@@ -16,6 +16,7 @@ import redis.clients.jedis.exceptions.JedisConnectionException
 import rea.Config
 import redis.clients.jedis.JedisPool
 import redis.clients.jedis.JedisPoolConfig
+import org.apache.lucene.misc.HighFreqTerms
 
 object Implicits {
   implicit class IntegerUtils(wrapped:Int) {
@@ -80,11 +81,12 @@ object StopWatch {
   }
 }
 
-class DFWeighter(index: Index) extends Weighter {
+class DFWeighter(index: Index, doWarmUp:Boolean = false) extends Weighter {
   val cache = mutable.Map[String, Double]()
   val DEFAULT = java.lang.Double.MAX_VALUE
 
-  // warmUp()
+  if (doWarmUp)
+    warmUp()
 
   override def weight(s: String): Double = {
     var tf:Double = 0.0
@@ -115,6 +117,7 @@ class DFWeighter(index: Index) extends Weighter {
 
     println(s"TF cache warmup done: ${cache.size} keys")
   }
+
 }
 
 class DefaultWeighter extends Weighter {

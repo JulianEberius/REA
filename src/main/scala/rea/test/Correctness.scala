@@ -51,7 +51,7 @@ object CorrectnessTest extends REATest {
     val results = retrieveMatchResults(req) match {
       case Some(mr) => mr
       case None => {
-        val rea = new REA(index, req)
+        val rea = createREA(index, req)
         val startT = System.currentTimeMillis
         val r = rea.process()
         retrievalRunTime = System.currentTimeMillis - startT
@@ -66,7 +66,7 @@ object CorrectnessTest extends REATest {
 
     val rankedResults = results.toSeq.sortBy(d => (d.values.size / entities.size.toDouble) * d.score).reverse
     val topResults = rankedResults
-    val store = new CorrectnessStore("answers.db")
+    val store = new CorrectnessStore(config.getString(ANSWERS_DB))
     println(s"${results.size} results, using"+topResults.size )
     val attrString = config.getString(ATTRIBUTE)
 
@@ -76,8 +76,8 @@ object CorrectnessTest extends REATest {
 
     val searchSpaceFactor = config.getInt(SEARCH_SPACE_FACTOR)
     var algos = List[SetCoverer]()
-    val combinations = Seq( (0.0, 1.0), (0.4, 0.9), (0.4,0.0) )
-    // val combinations = Seq( (0.4,0.0))
+    // val combinations = Seq( (0.0, 1.0), (0.4, 0.9), (0.4,0.0) )
+    val combinations = Seq( (0.0,1.0))
     for ((th,tc) <- combinations) {
       // algos ::= new GreedySetCoverer(config.getInt(NUM_COVERS), coverableEntities, topResults, thCons=th, thCov=tc)
       //   with ResultScorer

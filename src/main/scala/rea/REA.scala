@@ -28,17 +28,22 @@ import rea.index.RemoteIndex
 import rea.index.SearchResult
 import rea.scoring.Scorer
 import rea.util.DFWeighter
+import rea.util.{ IsNumericPredicate, NumericValuedPredicate, NumericPredicate }
+import de.tudresden.matchtools.weights.Weighter
 import rea.util.IdentityByContentHashFilter
-import rea.analysis.DataTypes
-import rea.analysis._
+import webreduce.typing.DataType
 
 case class MappingResult(tColIdx: Int, cColIdx: Int, covA: Double, covB: Double, monog: Double, mat: SimMatrix)
 
-class REA(index: Index, req: REARequest) {
+class REA(index: Index, req: REARequest, _weighter: Weighter = null) {
 
   val MAX_CANDS = 10
-  val datasetFilter = new IdentityByContentHashFilter()
-  val weighter = new DFWeighter(index)
+  // val datasetFilter = new IdentityByContentHashFilter()
+  val weighter =
+    if (_weighter != null)
+      _weighter
+    else
+      new DFWeighter(index)
   val attribute = req.attribute.map(analyze)
   val entities = req.entities.map(analyze)
   val concept = req.concept.map(analyze)
@@ -47,19 +52,25 @@ class REA(index: Index, req: REARequest) {
   val matchTools = new MatchTools(weighter)
   val NULL_LOOKUP_LIMIT = 1
   val TOTAL_LOOKUP_LIMIT = 1
+  val RELATIONAL_CANDIDATES_MULTIPLIER = 10
   var globalIdCounter = 0
 
   def process(): Seq[DrilledDataset] = {
     val relationalResults = processSearchResult(
+      // index.search(attribute, entities, concept, req.numResults*RELATIONAL_CANDIDATES_MULTIPLIER))
       index.search(attribute, entities, concept, req.numResults))
 
     val entityResults = if (req.entityTables)
       entities.toSeq.zipWithIndex.flatMap {
         case (e, i) => processEntitySearchResult(
-          index.searchSingle(attribute, e, concept, req.numResults / 5), i)
+          index.searchSingle(attribute, e, concept, max(req.numResults / 5, 1)), i)
       }
-      else
-        Seq()
+    else
+      Seq()
+    // println(s"req.numResults: ${req.numResults}")
+    // println(s"relationalResults.size: ${relationalResults.size}")
+    // println(s"entityResults.size: ${entityResults.size}")
+    // println(s"index.search(attribute, entities, concept, req.numResults)): ${index.search(attribute, entities, concept, req.numResults).size}")
 
     val result = relationalResults ++ entityResults
     if (result.isEmpty)
@@ -80,7 +91,6 @@ class REA(index: Index, req: REARequest) {
     val stdDev = sd.getResult
     return entityResultCounts.filter { case (idx, lst) => lst.size < mean - stdDev }.map(_._1)
       .map(v => (entities(v), v))
-
   }
 
   def extractDomain(url: String): String = {
@@ -95,7 +105,8 @@ class REA(index: Index, req: REARequest) {
       case None =>
         result
       case Some(SearchResult(datasets, handle)) => {
-        val newResults = datasets.filterNot(datasetFilter.filter(_)).flatMap(processEntityDataset(_, forIdx))
+        // val newResults = datasets.filterNot(datasetFilter.filter(_)).flatMap(processEntityDataset(_, forIdx))
+        val newResults = datasets.flatMap(processEntityDataset(_, forIdx))
 
         if (newResults.isEmpty && totalLookups < NULL_LOOKUP_LIMIT) {
           val nextSearchResult = index.continueSearch(handle)
@@ -115,7 +126,8 @@ class REA(index: Index, req: REARequest) {
     val eH = bestLocation(entity, columns)
     val aM = locations(attribute, columns)
 
-    if (eH.isEmpty)
+    if (eH.isEmpty
+      || !(aM.map(_.b).forall(_ > eH.get.b))) // hack hack: ignore entitiy hits if they appear below any of the attribute hits
       aM.flatMap(m => {
         // found attribute in first col
         if (m.a == 0)
@@ -131,32 +143,42 @@ class REA(index: Index, req: REARequest) {
           None
       })
     else
-      aM.flatMap(intersect(columns, eH.get, _)).map(intrs =>
+      aM.flatMap(intersect(columns, eH.get, _)).map(intrs => {
+        val drilledValues = Array(DrilledValue(forIdx, intrs.v, dataset, intrs.aMatch.a, intrs.aMatch.b, intrs.x, intrs.y, intrs.sim, nextGlobalId()))
         DrilledDataset(req, dataset,
-          Array(DrilledValue(forIdx, intrs.v, dataset, intrs.aMatch.a, intrs.aMatch.b, intrs.x, intrs.y, intrs.sim, nextGlobalId())),
-          entityDSScore(intrs.sim, eH.get.c, dataset),
-          MatchInfo(intrs.aMatch.a, intrs.aMatch.b, null)))
+          drilledValues,
+          entityDSScore(intrs.sim, eH.get.c, dataset, drilledValues),
+          MatchInfo(intrs.aMatch.a, intrs.aMatch.b, null))
+      })
   }
 
-  def processCellRange(entity:String, m: MatchingIndices, forIdx: Int, dataset: Dataset, cells: Seq[String],
-     contextCol: Array[String], col_idx: Option[Int] = None, row_idx: Option[Int] = None): Iterable[DrilledDataset] =
+  def _predicatesApply(cell: Object) =
+    req.predicates.forall(_.applicableForValue(cell))
+
+  def processCellRange(entity: String, m: MatchingIndices, forIdx: Int, dataset: Dataset, cells: Seq[String],
+    contextCol: Array[String], col_idx: Option[Int] = None, row_idx: Option[Int] = None): Iterable[DrilledDataset] =
     if (cells.size > 5)
       None
     else
-      cells.map(coerceToNumber).zipWithIndex.dropWhile(_._1.isEmpty).takeWhile(_._1.isDefined).map {
-        case (d, i) =>
-          DrilledDataset(req,
-            dataset,
-            Array(DrilledValue(forIdx, d.get, dataset, m.a, m.b, col_idx.getOrElse(i), row_idx.getOrElse(i), m.c, nextGlobalId())),
-            entityDSScore(m.c, titleMatch(entity, dataset.title), dataset),
-            MatchInfo(
-              m.a, m.b,
-              if (contextCol !=null) contextCol(i) else null))
-      }
+      // cells.map(coerceToNumber).zipWithIndex.drop(1).map {
+      cells.map(coerceToNumber).zipWithIndex.drop(1).
+        dropWhile { case (cell, _) => !req.predicates.isEmpty && !_predicatesApply(cell) }.
+        takeWhile { case (cell, _) => _predicatesApply(cell) }.map {
+          case (d, i) => {
+            val drilledValues = Array(DrilledValue(forIdx, d, dataset, m.a, m.b, col_idx.getOrElse(i), row_idx.getOrElse(i), m.c, nextGlobalId()))
+            DrilledDataset(req,
+              dataset,
+              drilledValues,
+              entityDSScore(m.c, titleMatch(entity, dataset.title), dataset, drilledValues),
+              MatchInfo(
+                m.a, m.b,
+                if (contextCol != null) contextCol(i) else null))
+          }
+        }
 
-  def titleMatch(e:String, title:String) = matchTools.aFocusedByWordLevenshtein.similarity(e, title)
+  def titleMatch(e: String, title: String) = matchTools.aFocusedByWordLevenshtein.similarity(e, title)
 
-  def entityDSScore(attSim: Double, entitySim: Double, dataset: Dataset) =
+  def entityDSScore(attSim: Double, entitySim: Double, dataset: Dataset, values: Seq[DrilledValue]) =
     DrillScores.create(
       attSim,
       entitySim,
@@ -165,8 +187,8 @@ class REA(index: Index, req: REARequest) {
       Scorer.titleScore(req, dataset),
       1.0 / entities.length,
       1.0,
-      Scorer.domainScore(dataset)
-      )
+      Scorer.domainScore(dataset),
+      Scorer.predicateScore(req, values))
 
   def locations(x: Array[String], relation: Array[Array[String]]) = {
     val hm = matchTools.locate(x, relation)
@@ -183,7 +205,7 @@ class REA(index: Index, req: REARequest) {
       None
   }
 
-  case class Intersection(x: Int, y: Int, sim: Double, v: Double, eMatch: MatchingIndices, aMatch: MatchingIndices)
+  case class Intersection(x: Int, y: Int, sim: Double, v: Object, eMatch: MatchingIndices, aMatch: MatchingIndices)
 
   def intersect(relation: Array[Array[String]], e: MatchingIndices, a: MatchingIndices): Option[Intersection] = {
     if (e.a == a.a || e.b == a.b)
@@ -191,11 +213,13 @@ class REA(index: Index, req: REARequest) {
     val x = max(e.a, a.a)
     val y = max(e.b, a.b)
     val v = coerceToNumber(relation(x)(y))
-    val sim = (e.c + a.c) / 2.0
-    if (v.isEmpty)
+    if (_predicatesApply(v)) {
+      val sim = (e.c + a.c) / 2.0
+      Some(Intersection(x, y, sim, v, e, a))
+    } else {
       None
-    else
-      Some(Intersection(x, y, sim, v.get.asInstanceOf[java.lang.Double], e, a))
+    }
+
   }
 
   def processSearchResult(searchResult: Option[SearchResult],
@@ -203,9 +227,15 @@ class REA(index: Index, req: REARequest) {
     nullLookups: Int = 0, totalLookups: Int = 0, foundIndices: Set[Int] = Set()): Seq[DrilledDataset] =
     searchResult match {
       case None => result
-      case Some(SearchResult(datasets, _)) => {
-        // main processing
-        val newCandidates = datasets.filterNot(datasetFilter.filter(_)).flatMap(processDataset)
+      case Some(SearchResult(datasets, handle)) => {
+        // for (d <- datasets) {
+        //   println("CANDIDATES: " + d.title + " " + d.attributes.mkString("|"))
+        // }
+
+        val newCandidates = datasets.flatMap(processDataset)
+        // for (d <- newCandidates) {
+        //   println("MATCHES: " + d.dataset.title + " " + d.dataset.attributes.mkString("|"))
+        // }
 
         // preparing next iteration if necessary
         val newFoundIndices = markFoundIndicesHolistic(newCandidates, foundIndices)
@@ -213,15 +243,31 @@ class REA(index: Index, req: REARequest) {
         val foundNew = newFoundIndices.size > foundIndices.size
 
         // if there not enough results, try to continue with the next datasets from the index
-        if (newFoundIndices.size >= targetIndices.size ||
+        if (allFoundIndices.size >= targetIndices.size ||
           nullLookups >= NULL_LOOKUP_LIMIT ||
           totalLookups >= TOTAL_LOOKUP_LIMIT)
           return result ++ newCandidates
 
-        val freeEntities = entities.zipWithIndex.collect {
-          case (v, i) if !allFoundIndices.contains(i) => v
-        }
-        val nextSearchResult = index.search(attribute, freeEntities, concept, req.numResults)
+        // NEW SEARCH WITH FREE ENTITIES
+        // val freeEntities = entities.zipWithIndex.collect {
+        //   case (v, i) if !allFoundIndices.contains(i) => v
+        // }
+        // println(s"freeEntities: ${freeEntities.mkString(" ")}")
+        // val nextSearchResult = index.search(attribute, freeEntities, concept, req.numResults)
+
+        // NEW SEARCH AS CONTINUED OLD SEARCH
+        val nextSearchResult = index.continueSearch(handle)
+
+        // WITH REFREEING
+        // var freeEntitiesIdx = entities.zipWithIndex.collect {
+        //   case (v, i) if !allFoundIndices.contains(i) => i
+        // }.toSet[Int]
+        // val refreedEntities = refreeEntities(newCandidates).map(_._2)
+        // println(s"refreedEntities: ${refreedEntities}")
+        // freeEntitiesIdx ++= refreedEntities
+        // val freeEntities = freeEntitiesIdx.map(entities(_)).toArray
+        // println(s"freeEntities: ${freeEntities.mkString(" ")}")
+        // val nextSearchResult = index.search(attribute, freeEntities, concept, req.numResults)
 
         processSearchResult(nextSearchResult, result ++ newCandidates,
           if (foundNew) nullLookups else nullLookups + 1,
@@ -231,36 +277,60 @@ class REA(index: Index, req: REARequest) {
     }
 
   def markFoundIndicesHolistic(candidates: Iterable[DrilledDataset], alreadyFound: Set[Int] = Set()): Set[Int] =
-    candidates.foldLeft(alreadyFound) {
-      (resultSet, candidate) => resultSet ++ candidate.values.map(_.forIndex)
+    candidates.foldLeft(Set[Int]()) {
+      (resultSet, candidate) =>
+        resultSet ++ candidate.values.map(_.forIndex).filterNot(alreadyFound.contains(_))
     }
+
+  case class ValueColMatch(objs: Seq[Object], originalIdx: Int, sim: Double)
 
   case class DatasetInProcess(dataset: Dataset,
     columns: Array[Array[String]],
     textColsIdx: Seq[Int],
-    valueColMatches: Seq[(Int, Double)])
+    valueColMatches: Seq[ValueColMatch])
   // titleScore: Double)
 
   def processDataset(dataset: Dataset): Iterable[DrilledDataset] = {
+    // println(dataset.title + " -> " + dataset.attributes.mkString("|"))
     val candColumns = for (c <- dataset.relation) yield c.drop(1)
     val candHeader = dataset.attributes
 
-    val colTypes = candColumns.map(DataTypes.columnType(_))
-    val (candTextColsIdx, candNonTextColsIdx) = candColumns.indices.partition(colTypes(_) == STRING)
-    val candNumHeader = candNonTextColsIdx.map(candHeader(_))
+    // val colTypes = candColumns.map(DataTypes.columnType(_))
+    // val (candTextColsIdx, candNonTextColsIdx) = candColumns.indices.partition(colTypes(_) == STRING)
+    val (candTextColsIdx, candNonTextColsIdx) = candColumns.indices.partition(dataset.colTypes(_) == DataType.STRING)
 
-    if (candNumHeader.length == 0) {
-      //            println(" ... no num cols!")
+    // special casing, but oh my
+    val candValHeaderIdx =
+      if (req.predicates.exists(_.isInstanceOf[NumericPredicate]))
+        candNonTextColsIdx
+      else
+        candColumns.indices
+
+    val valueCols = candValHeaderIdx.map(i => (candColumns(i), i)).map { case (col, i) => (col.map(coerceToNumber), i) }
+    val numericValuedPredicates = req.predicates.filter(_.isInstanceOf[NumericValuedPredicate])
+    val discValueCols =
+      if (numericValuedPredicates.isEmpty)
+        valueCols
+      else
+        valueCols.filter {
+          case (vCol, vColIdx) =>
+            numericValuedPredicates.exists(p => p.discriminates(vCol))
+        }
+
+    // println(s"there are ${candColumns.size} cols, ${candValHeaderIdx.size} numCols, and ${discValueCols.size} discriminating cols")
+    val candValHeader = discValueCols.map { case (vCol, i) => candHeader(i) }
+    // println(s"cand header: ${candValHeader.mkString(" ")}")
+
+    if (candValHeader.length == 0) {
       return None
     }
     /* 3. Match attribute names to keywords -> identify value cols*/
-    //    val keyword_syns = kwGroups.flatten.map(_.toLowerCase).toSet[String]
+    // val keyword_syns = kwGroups.flatten.map(_.toLowerCase).toSet[String]
     // val keyword_syns = kwGroups.flatten.map(_.toLowerCase).map(Wordnet.synonyms).flatten.map(_.toLowerCase).toSet[String]
     val valueColMatches =
-      (for ((c, sim) <- findValueCols(attribute, candNumHeader.toArray)) yield (candNonTextColsIdx(c), sim)).toList
+      (for ((c, sim) <- findValueCols(attribute, candValHeader.toArray)) yield ValueColMatch(discValueCols(c)._1, discValueCols(c)._2, sim)).toList
 
     if (valueColMatches.isEmpty) {
-      //            println(" ... no matching val cols!")
       return None
     }
 
@@ -274,13 +344,11 @@ class REA(index: Index, req: REARequest) {
       /* filter datasets without match */
       case None => None
       /* filter datasets with to few matches */
-      // case Some(mr: MappingResult) if (mr.covA < 0.05 || mr.covB < 0.05) => None
       case Some(mr: MappingResult) => {
         inProcessDataset.valueColMatches.flatMap {
-          case (c, sim) => {
-            // println("creating result to "+candHeader(c))
+          case ValueColMatch(col, originalIdx, sim) => {
             processValueCol(
-              entities.indices, inProcessDataset, mr, c, sim)
+              col, entities.indices, inProcessDataset, mr, originalIdx, sim)
           }
         }
       }
@@ -291,32 +359,27 @@ class REA(index: Index, req: REARequest) {
   def findEntityMatch(entities: Array[String], inProcessDataset: DatasetInProcess): Option[MappingResult] =
     matchTCol(0, preparedEntities, inProcessDataset)
 
-  def processValueCol(tColIndices: Range, inProcessDataset: DatasetInProcess, mappingResult: MappingResult, vColIdx: Int, sim: Double) = {
-    val valCol = inProcessDataset.columns(vColIdx)
+  def processValueCol(valCol: Seq[Object], tColIndices: Range, inProcessDataset: DatasetInProcess, mappingResult: MappingResult, vColIdx: Int, sim: Double) = {
     val mappingMap = mappingResult.mat.getMatchingIndicesMapAtoBWithSim()
 
     val newVals = tColIndices.flatMap(i =>
       if (mappingMap.isDefinedAt(i))
-        coerceToNumber(valCol(mappingMap(i).b)) match {
-          case Some(v) => Some(DrilledValue(i, v, inProcessDataset.dataset, mappingResult.cColIdx, mappingMap(i).b + 1, vColIdx, mappingMap(i).b + 1, mappingMap(i).c, nextGlobalId()))
-          case None => None
-        }
+        Some(DrilledValue(i, valCol(mappingMap(i).b), inProcessDataset.dataset, mappingResult.cColIdx, mappingMap(i).b + 1, vColIdx, mappingMap(i).b + 1, mappingMap(i).c, nextGlobalId()))
       else
         None)
 
-    val averageAttributeSim = (inProcessDataset.valueColMatches.map(_._2).sum) / inProcessDataset.valueColMatches.size
+    val averageAttributeSim = (inProcessDataset.valueColMatches.map(_.sim).sum) / inProcessDataset.valueColMatches.size
     val dataset = inProcessDataset.dataset
     val scores = DrillScores.create(
       averageAttributeSim,
-      //mappingResult.monog,
       mappingMap.toSeq.map(_._2.c).sum / mappingMap.size.toDouble,
       Scorer.conceptSim(req, dataset, mappingResult.cColIdx),
       Scorer.termScore(req, dataset),
       Scorer.titleScore(req, dataset),
       mappingResult.covA,
       mappingResult.covB,
-      Scorer.domainScore(dataset)
-      )
+      Scorer.domainScore(dataset),
+      Scorer.predicateScore(req, newVals))
 
     if (newVals.isEmpty)
       None
@@ -335,10 +398,8 @@ class REA(index: Index, req: REARequest) {
     val cleanedNumHeader = candNumHeader.map(analyze)
     val mat = matchTools.doMatch(
       keyword_syns,
-      // cleanedNumHeader, List(matchTools.ngram, matchTools.weightedByWordLevenshtein))
       cleanedNumHeader, List(matchTools.ngram, matchTools.aFocusedByWordLevenshtein))
     mat.selectThreshold(0.5)
-    // mat.selectThreshold(0.3)
     mat.selectMaxDelta(0.1)
 
     val mapping = mat.getMatchingIndices
@@ -352,8 +413,7 @@ class REA(index: Index, req: REARequest) {
   def matchTCol(tColIdx: Int, targetCol: Array[PreparedString], inProcessDataset: DatasetInProcess): Option[MappingResult] = {
     val mappings = inProcessDataset.textColsIdx.flatMap(
       cColIdx => matchCCol(tColIdx, targetCol, cColIdx,
-        inProcessDataset.columns(cColIdx).map(cell => new PreparedString(analyze(cell), weighter)))
-    )
+        inProcessDataset.columns(cColIdx).map(cell => new PreparedString(analyze(cell), weighter))))
     if (mappings.isEmpty)
       None
     else

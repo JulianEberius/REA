@@ -11,8 +11,6 @@ import rea.definitions.DrilledDataset
 import org.apache.commons.math3.stat.descriptive.SummaryStatistics
 import rea.Config
 
-/*
- */
 
 object Coherence {
 

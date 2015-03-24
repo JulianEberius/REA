@@ -8,7 +8,7 @@ import org.apache.lucene.search.BooleanClause
 import org.apache.lucene.index.{ IndexReader, DirectoryReader, Term }
 import org.apache.lucene.util.Version
 import org.apache.lucene.store.{ NIOFSDirectory, MMapDirectory }
-import java.io.{ StringReader, File }
+import java.io.{ StringReader, File, PrintWriter }
 import java.net.URL
 import org.apache.http.client.fluent._
 import org.apache.lucene.queryparser.classic.QueryParser
@@ -34,21 +34,51 @@ import rea.util.{IdentityByContentHashFilter, ByTitleAndPositionFilter}
 import rea.util.DatasetFilter
 import scala.reflect.ClassTag
 import scala.util.Random
-import rea.analysis.REAAnalyzer
+import org.iq80.leveldb._
+import org.fusesource.leveldbjni.JniDBFactory._
+import com.google.common.primitives.Longs
+import org.apache.lucene.search.CachingWrapperFilter
+import org.apache.lucene.queries.TermsFilter
+import org.apache.lucene.search.Filter
+import webreduce.cleaning.CustomAnalyzer
+import org.apache.lucene.misc.TermStats
 
 // class SearchResult
 case class SearchResult(datasets: Array[Dataset], handle: Int) extends JSONSerializable
 case class TermFrequencyResult(frequency: Double) extends JSONSerializable
 
 trait Index {
-  def search(attribute: Array[String], relation: Array[String], concept: Array[String], numResults: Int = 30): Option[SearchResult]
-  def searchSingle(attribute: Array[String], entity: String, concept: Array[String], numResults: Int = 5): Option[SearchResult]
+  val useFilteredApi:Boolean
+  def search(attribute: Array[String], relation: Array[String], concept: Array[String], numResults: Int = 30, filteredApi:Boolean = useFilteredApi): Option[SearchResult]
+  def search2(attribute: Array[String], relation: Array[String], concept: Array[String], numResults: Int = 30): Option[SearchResult]
+  def searchSingle(attribute: Array[String], entity: String, concept: Array[String], numResults: Int = 5, filteredApi:Boolean = useFilteredApi): Option[SearchResult]
+  def searchSingle2(attribute: Array[String], entity: String, concept: Array[String], numResults: Int = 5): Option[SearchResult]
   def continueSearch(handle: Int, numResults: Int = 30): Option[SearchResult]
   def keywordGroups(kw: String): List[List[String]]
   def termFrequency(termString: String): Double
   def findDatasetByURL(url: String): Option[SearchResult]
   def randomDataset(): Option[SearchResult]
   def findDatasetByIndex(id: Int): Option[SearchResult]
+
+  // entity search
+  def entitySearch(concept: String, attributes: Array[String], seed: Array[String] = Array(), numResults: Int = 30): Option[SearchResult]
+}
+
+class NoopIndex extends Index {
+  val useFilteredApi = false
+  def search(attribute: Array[String], relation: Array[String], concept: Array[String], numResults: Int = 30, filteredApi:Boolean = useFilteredApi): Option[SearchResult] = None
+  def search2(attribute: Array[String], relation: Array[String], concept: Array[String], numResults: Int = 30): Option[SearchResult] = None
+  def searchSingle(attribute: Array[String], entity: String, concept: Array[String], numResults: Int = 5, filteredApi:Boolean = useFilteredApi): Option[SearchResult] = None
+  def searchSingle2(attribute: Array[String], entity: String, concept: Array[String], numResults: Int = 5): Option[SearchResult] = None
+  def continueSearch(handle: Int, numResults: Int = 30): Option[SearchResult] = None
+  def keywordGroups(kw: String): List[List[String]] = List()
+  def termFrequency(termString: String): Double = 0.0
+  def findDatasetByURL(url: String): Option[SearchResult] = None
+  def randomDataset(): Option[SearchResult] = None
+  def findDatasetByIndex(id: Int): Option[SearchResult] = None
+
+  // entity search
+  def entitySearch(concept: String, attributes: Array[String], seed: Array[String] = Array(), numResults: Int = 30): Option[SearchResult] = None
 }
 
 trait HandleStore[E] {
@@ -81,7 +111,7 @@ trait KeywordQueryProcessor {
   }
 }
 
-class LocalIndex(indexDir: String,val debug: Boolean = false) extends Index with HandleStore[(Query, ScoreDoc, DatasetFilter)] with KeywordQueryProcessor {
+class LocalIndex(indexDir: String,val debug: Boolean = true, val useFilteredApi: Boolean = false) extends Index with HandleStore[(Query, ScoreDoc)] with KeywordQueryProcessor {
 
   val ENTITIES_FIELD = "entities"
   val ATTRIBUTES_FIELD = "attributes"
@@ -89,18 +119,42 @@ class LocalIndex(indexDir: String,val debug: Boolean = false) extends Index with
   val KEYS_FIELD = "keys"
   val TERMS_FIELD = "terms"
   val URL_FIELD = "url"
+  val TABLE_TYPE_FIELD = "tableType"
+
+  val leveldb: Option[DB] = {
+    val f = new File(indexDir, "leveldb")
+    if (f.exists() && f.isDirectory()) {
+      val options = new Options()
+      options.createIfMissing(false)
+      Some(factory.open(f, options))
+    }
+    else
+      None
+  }
 
   var searcher: IndexSearcher = new IndexSearcher(DirectoryReader.open(new NIOFSDirectory(new File(indexDir))))
+  //  var searcher: IndexSearcher = new IndexSearcher(DirectoryReader.open(new MMapDirectory(new File(indexDir))))
   var reader: IndexReader = searcher.getIndexReader
   var totalTermFrequency: Int = 0
-  val qpa = new QueryParser(Version.LUCENE_45, ATTRIBUTES_FIELD, new REAAnalyzer())
-  val qpt = new QueryParser(Version.LUCENE_45, TITLE_FIELD, new REAAnalyzer())
-  val qpk = new QueryParser(Version.LUCENE_45, KEYS_FIELD, new REAAnalyzer())
-  val qpterms = new QueryParser(Version.LUCENE_45, TERMS_FIELD, new REAAnalyzer())
-  val qpe = new QueryParser(Version.LUCENE_45, ENTITIES_FIELD, new REAAnalyzer())
-  val qpu = new QueryParser(Version.LUCENE_45, URL_FIELD, new REAAnalyzer())
+  val qpa = new QueryParser(ATTRIBUTES_FIELD, new CustomAnalyzer())
+  val qpt = new QueryParser(TITLE_FIELD, new CustomAnalyzer())
+  val qpk = new QueryParser(KEYS_FIELD, new CustomAnalyzer())
+  val qpterms = new QueryParser(TERMS_FIELD, new CustomAnalyzer())
+  val qpe = new QueryParser(ENTITIES_FIELD, new CustomAnalyzer())
+  val qpu = new QueryParser(URL_FIELD, new CustomAnalyzer())
 
   val rnd = new Random(0)
+
+  val typeFilterE = new CachingWrapperFilter(new TermsFilter(new Term(TABLE_TYPE_FIELD, "ENTITY")))
+  val typeFilterR = new CachingWrapperFilter(new TermsFilter(new Term(TABLE_TYPE_FIELD, "RELATION")))
+
+  Runtime.getRuntime.addShutdownHook(new Thread() {
+    override def run() {
+      if (leveldb.isDefined) {
+        leveldb.get.close()
+      }
+    }
+  })
 
   def createQuery(attributes: Array[String], relation: Array[String], concept: Array[String]) = {
     val q = new BooleanQuery()
@@ -121,7 +175,7 @@ class LocalIndex(indexDir: String,val debug: Boolean = false) extends Index with
     }
     q.add(bqa, BooleanClause.Occur.MUST)
 
-    // concept should be present in attributes
+    // concept should be present in attribute
     for (c <- concept) {
       val qc = qpa.parse(c)
       qc.setBoost(0.7f)
@@ -133,10 +187,10 @@ class LocalIndex(indexDir: String,val debug: Boolean = false) extends Index with
     for (e <- entitySet) {
       val qe = qpe.parse(QueryParserBase.escape(e))
       qe.setBoost(0.9f)
-      val qeph = qpe.parse("\""+QueryParserBase.escape(e)+"\"")
-      qeph.setBoost(1.7f)
+      // val qeph = qpe.parse("\""+QueryParserBase.escape(e)+"\"")
+      // qeph.setBoost(1.7f)
       q.add(qe, BooleanClause.Occur.SHOULD)
-      q.add(qeph, BooleanClause.Occur.SHOULD)
+      // q.add(qeph, BooleanClause.Occur.SHOULD)
     }
 
     q
@@ -156,35 +210,96 @@ class LocalIndex(indexDir: String,val debug: Boolean = false) extends Index with
     result
   }
 
-  def toDatasets(td: TopDocs) = td.scoreDocs.map(h => {
-    val ds = JSONSerializable.fromJson(classOf[Dataset], searcher.doc(h.doc).get("full_result"))
-    ds.indexId = h.doc
+  def toDataset(docNo:Int) = {
+    val luceneDoc = searcher.doc(docNo)
+    val jsonDoc =
+      if (leveldb.isDefined)
+        asString(leveldb.get.get(
+            Longs.toByteArray(
+                Longs.tryParse(luceneDoc.get("document_id")))))
+      else
+        luceneDoc.get("full_result")
+    val ds = JSONSerializable.fromJson(classOf[Dataset], jsonDoc)
+    ds.indexId = docNo
     ds
-  })
+  }
 
-  def search(attribute: Array[String], relation: Array[String], concept: Array[String], numResults: Int = 30) = {
+  def toDatasets(td: TopDocs) = td.scoreDocs.map(sd => toDataset(sd.doc))
+
+  def search(attribute: Array[String], relation: Array[String], concept: Array[String], numResults: Int = 30, filteredApi:Boolean = useFilteredApi) =
+    if (filteredApi)
+      _search(attribute, relation, concept, numResults, Some(typeFilterR))
+    else
+      _search(attribute, relation, concept, numResults, None)
+
+  def _search(attribute: Array[String], relation: Array[String], concept: Array[String], numResults: Int = 30, filter:Option[Filter]) = {
     val t = System.currentTimeMillis
     val query = createQuery(attribute, relation, concept)
     if (debug)
       println("QUERY: " + query.toString())
-    val result = searcher.search(query, numResults)
-    if (debug)
+    val result = filter match {
+      case None => searcher.search(query, numResults)
+      case Some(filter) => searcher.search(query, filter, numResults)
+    }
+    if (debug) {
       println("time: " + (System.currentTimeMillis - t))
+      // println(s"numResults: $numResults and found: ${result.scoreDocs.length}")
+    }
     if (result.scoreDocs.length > 0)
       toSearchResult(query, result)
     else
       None
   }
 
+  def search2(attribute: Array[String], relation: Array[String], concept: Array[String], numResults: Int = 30): Option[SearchResult] = {
+    val t = System.currentTimeMillis
+
+    // attribute must be present (better as phrase)
+    val bqa = new BooleanQuery()
+    for (a <- attribute) {
+      // val qa = qpa.parse(a)
+      // qa.setBoost(0.7f)
+      // bqa.add(qa, BooleanClause.Occur.SHOULD)
+      // temporary
+      val qa2 = qpa.parse("\""+a+"\"")
+      bqa.add(qa2, BooleanClause.Occur.SHOULD)
+    }
+
+    val entitySet = relation.toSet[String].filter(_ != null).take(200)
+    var docNoMap = mutable.HashMap[Int,Int]().withDefaultValue(0)
+    for (e <- entitySet) {
+      val ti = System.currentTimeMillis
+      val query = new BooleanQuery()
+      val qe = qpe.parse(QueryParserBase.escape(e))
+      query.add(qe, BooleanClause.Occur.MUST)
+      query.add(bqa, BooleanClause.Occur.MUST)
+      if (debug)
+        println("QUERY: " + query.toString())
+      val result = searcher.search(query, typeFilterR, numResults*10)
+      result.scoreDocs.foreach { h => docNoMap(h.doc) += 1 }
+    }
+
+    val topDocNos = docNoMap.toSeq.sortBy(_._2).reverseIterator.take(numResults).map(_._1)
+    if (debug)
+      println("time: " + (System.currentTimeMillis - t))
+    val ds = topDocNos.map(toDataset).toArray
+    Some(SearchResult(ds, -1))
+  }
+
   def toSearchResult(query: Query, result: TopDocs) = {
-    val datasetFilter = new ByTitleAndPositionFilter()
-    val handle = storeWithHandle((query, result.scoreDocs.last, datasetFilter))
+    val handle = storeWithHandle((query, result.scoreDocs.last))
     assert(result.scoreDocs.length > 0)
-    val ds = toDatasets(result).filterNot(datasetFilter.filter(_))
+    val ds = toDatasets(result)
     Some(SearchResult(ds, handle))
   }
 
-  def searchSingle(attribute: Array[String], entity: String, concept: Array[String], numResults: Int = 5): Option[SearchResult] = {
+  def searchSingle(attribute: Array[String], entity: String, concept: Array[String], numResults: Int = 5, filteredApi:Boolean = useFilteredApi): Option[SearchResult] =
+    if (filteredApi)
+      _searchSingle(attribute, entity, concept, numResults, Some(typeFilterE))
+    else
+      _searchSingle(attribute, entity, concept, numResults, None)
+
+  def _searchSingle(attribute: Array[String], entity: String, concept: Array[String], numResults: Int = 5, filter:Option[Filter]): Option[SearchResult] = {
     val entityQueryString = entity.split(" ").mkString(" AND ")
 
     val title_query = qpt.parse(QueryParserBase.escape(entityQueryString))
@@ -192,8 +307,14 @@ class LocalIndex(indexDir: String,val debug: Boolean = false) extends Index with
     val qa = new BooleanQuery()
     val qk = new BooleanQuery()
     for (a <- attribute) {
+      // val sqa = qpa.parse(a)
+      // val sqk = qpk.parse(a)
       val sqpha = qpa.parse("\"" + a + "\"")
       val sqphk = qpk.parse("\"" + a + "\"")
+      // sqpha.setBoost(1.7f)
+      // sqphk.setBoost(1.7f)
+      // qa.add(sqa, BooleanClause.Occur.SHOULD)
+      // qk.add(sqk, BooleanClause.Occur.SHOULD)
       qa.add(sqpha, BooleanClause.Occur.SHOULD)
       qk.add(sqphk, BooleanClause.Occur.SHOULD)
     }
@@ -216,7 +337,10 @@ class LocalIndex(indexDir: String,val debug: Boolean = false) extends Index with
 
     if (debug)
       println("Entity-QUERY: " + query.toString())
-    val result = searcher.search(query, numResults)
+    val result = filter match {
+      case None => searcher.search(query, numResults)
+      case Some(filter) => searcher.search(query, filter, numResults)
+    }
     if (result.scoreDocs.length > 0)
       toSearchResult(query, result)
     else {
@@ -228,8 +352,42 @@ class LocalIndex(indexDir: String,val debug: Boolean = false) extends Index with
     }
   }
 
+  def searchSingle2(attribute: Array[String], entity: String, concept: Array[String], numResults: Int = 5): Option[SearchResult] = {
+    val entityQueryString = entity.split(" ").mkString(" AND ")
+    val title_query = qpt.parse(QueryParserBase.escape(entityQueryString))
+    val qa = new BooleanQuery()
+    val qk = new BooleanQuery()
+    for (a <- attribute) {
+      val sqpha = qpa.parse("\"" + a + "\"")
+      val sqphk = qpk.parse("\"" + a + "\"")
+      qa.add(sqpha, BooleanClause.Occur.SHOULD)
+      qk.add(sqphk, BooleanClause.Occur.SHOULD)
+    }
+
+    val kw_query = new BooleanQuery()
+    kw_query.add(qa, BooleanClause.Occur.SHOULD)
+    kw_query.add(qk, BooleanClause.Occur.SHOULD)
+
+    val query = new BooleanQuery()
+    query.add(kw_query, BooleanClause.Occur.MUST)
+    query.add(title_query, BooleanClause.Occur.MUST)
+
+    if (debug)
+      println("Entity-QUERY: " + query.toString())
+    val result = searcher.search(query, typeFilterE, numResults)
+    if (result.scoreDocs.length > 0)
+      toSearchResult(query, result)
+    else {
+      val cleanedEntity = clean(entity)
+      if (!cleanedEntity.equals(entity))
+        searchSingle2(attribute, cleanedEntity, concept, numResults)
+      else
+        None
+    }
+  }
+
   def continueSearch(handle: Int, numResults: Int = 30) = {
-    val (query, lastDoc, filter) = getByHandle(handle)
+    val (query, lastDoc) = getByHandle(handle)
     val result = searcher.searchAfter(lastDoc, query, numResults)
     if (result.scoreDocs.length > 0)
       toSearchResult(query, result)
@@ -301,7 +459,7 @@ class LocalIndex(indexDir: String,val debug: Boolean = false) extends Index with
   }
 }
 
-class RemoteIndex(_url: String, val debug: Boolean = false) extends Index() with KeywordQueryProcessor {
+class RemoteIndex(_url: String, val debug: Boolean = false, val useFilteredApi: Boolean = false) extends Index() with KeywordQueryProcessor {
 
   val serverUrl = if (_url.endsWith("/")) _url.dropRight(1) else _url
 
@@ -315,14 +473,28 @@ class RemoteIndex(_url: String, val debug: Boolean = false) extends Index() with
         case r: String => Some(JSONSerializable.fromJson(t, r))
       }
 
-  def search(attribute: Array[String], relation: Array[String], concept: Array[String], numResults: Int = 30) = {
+  def search(attribute: Array[String], relation: Array[String], concept: Array[String], numResults: Int = 30, filteredApi:Boolean = useFilteredApi) = {
     val r = new REARequest(concept, relation, attribute, numResults)
-    remoteCall(serverUrl + "/augmentRelation", r, classOf[SearchResult])
+    val path = if (useFilteredApi) "/augmentRelationFiltered" else "/augmentRelation"
+    remoteCall(serverUrl + path, r, classOf[SearchResult])
   }
 
-  def searchSingle(attribute: Array[String], entity: String, concept: Array[String], numResults: Int = 5) = {
+  def search2(attribute: Array[String], relation: Array[String], concept: Array[String], numResults: Int = 30) = {
+    val r = new REARequest(concept, relation, attribute, numResults)
+    val path = "/augmentRelationFiltered2"
+    remoteCall(serverUrl + path, r, classOf[SearchResult])
+  }
+
+  def searchSingle(attribute: Array[String], entity: String, concept: Array[String], numResults: Int = 5, filteredApi:Boolean = useFilteredApi) = {
     val r = new REARequest(concept, Array(entity), attribute, numResults)
-    remoteCall(serverUrl + "/augmentEntity", r, classOf[SearchResult])
+    val path = if (useFilteredApi) "/augmentEntityFiltered" else "/augmentEntity"
+    remoteCall(serverUrl + path, r, classOf[SearchResult])
+  }
+
+  def searchSingle2(attribute: Array[String], entity: String, concept: Array[String], numResults: Int = 5) = {
+    val r = new REARequest(concept, Array(entity), attribute, numResults)
+    val path = "/augmentEntityFiltered2"
+    remoteCall(serverUrl + path, r, classOf[SearchResult])
   }
 
   def continueSearch(handle: Int, numResults: Int = 30) = {
@@ -359,5 +531,26 @@ class RemoteIndex(_url: String, val debug: Boolean = false) extends Index() with
   def findDatasetByIndex(id: Int) = {
     val r = new READatasetRequest(id.toString)
     remoteCall(serverUrl + "/datasetByIndex", r, classOf[SearchResult])
+  }
+
+  def entitySearch(concept: String, attributes: Array[String], seed: Array[String] = Array(), numResults: Int = 30) = {
+    val r = new REAEntitySearchRequest(concept, attributes, seed, numResults)
+    remoteCall(serverUrl + "/entitySearch", r, classOf[SearchResult])
+  }
+
+}
+
+object Main {
+  def main(args: Array[String]): Unit = {
+    val ri = new RemoteIndex("http://141.76.47.133:9876");
+    ri.entitySearch("us universities", Array("name", "students")) match {
+      case None => println("no results")
+      case Some(sr) => sr.datasets.foreach(d => {
+        println(d.title)
+        println(d.prettyTable())
+        println()
+        println()
+      })
+    }
   }
 }

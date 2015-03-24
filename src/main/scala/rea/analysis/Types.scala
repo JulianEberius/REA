@@ -1,6 +1,8 @@
 package rea.analysis
 
 import java.util.regex.Pattern
+//import com.mdimension.jchronic.Chronic
+//import org.apache.commons.validator.routines._
 import scala.annotation.tailrec
 import scala.collection.mutable
 import rea.definitions._
@@ -104,24 +106,31 @@ object DataTypes {
 
 
     val toDouble = Pattern.compile("-?[\\d,]+\\.?\\d*")
-    def coerceToNumber(v: String): Option[Double] = {
-        // val s = v.replaceAll("[^\\d\\.-]+", "")
-
+    val wikiSpecialCase = Pattern.compile("\\d+00000000([1-9][\\d,]+\\.?\\d*)")
+    def coerceToNumber(v: String): Object = {
         val matcher = toDouble.matcher(v)
         val numbers = mutable.ArrayBuffer[String]()
         while (matcher.find())
         	numbers += matcher.group()
         if (numbers.isEmpty)
-            return None
+            return v
         val s = numbers.maxBy(_.size)
         if (s.length < v.length.toFloat * 0.5 && !v.startsWith(s))
-            return None
+            return v
         try {
-            Some(s.replaceAll("[^\\d\\.-]+", "").toDouble)
+            val m = wikiSpecialCase.matcher(s)
+            if (m.matches()) {
+                new java.lang.Double(m.group(1).replaceAll("[^\\d\\.-]+", "").toDouble)
+            } // special casing only for wikipedia
+            else
+                new java.lang.Double(s.replaceAll("[^\\d\\.-]+", "").toDouble)
         } catch {
             case _: Throwable => {
-                None
+                v
             }
         }
+    }
+    def main(args:Array[String]) {
+      println(typeCounts(Array("0.043", "123124124", "21343124124132424€", "2234131233213123123","32ewd","peter meyer","0.32eweews")));
     }
 }

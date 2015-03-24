@@ -106,6 +106,23 @@ trait InverseSimByEntityDistance extends DistanceMeasure {
 
 }
 
+object SetCoverer {
+  def printCovers(covers:Seq[Cover], coverer: SetCoverer, entities: Array[String]) = {
+    for ((c, i) <- covers.zipWithIndex) {
+      println(s"$i)\n--")
+      println(c.toString(entities))
+      println("cov: " + c.coverage(coverer.numEntities))
+      // println("score: " + c.inherentScore)
+      println("cons: " + c.consistency(coverer.cMat))
+      // println(c.datasets.map(d => d.scores.toString + "\n" +
+      //   s"(${d.scores.attSim} + ${d.scores.entitySim} * 0.9 + ${d.scores.conceptSim} * 0.25 + ${d.scores.termSim} * 0.25 + ${d.scores.titleSim} * 0.25 + ${d.scores.coverageA} + ${d.scores.coverageB} * 0.5  + ${d.scores.domainPopularity} * 0.8)"+
+      //   "\n" + s"${d.scores.score} + ${d.scores.inherentScore}").mkString("\n"))
+      // println(c.datasets.map(d => d.scores.toString).mkString("\n"))
+      println
+    }
+  }
+}
+
 trait UsageJaccardDistance extends DistanceMeasure {
   self:SetCoverer =>
 

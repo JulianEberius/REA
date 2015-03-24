@@ -40,7 +40,7 @@ abstract class MultiGreedySetCoverer(k:Int, _entities: Seq[Int],
   protected def createCovers(iteration: Int, covers: List[Cover], lastChange:Int): Seq[Cover] = {
     // stopping condition
     if (covers.size == maxCovers || iteration == maxIterations || lastChange == 10) {
-      println(s"finishing greedy*: ${covers.size}/${maxCovers} ${iteration}/${maxIterations} ${lastChange}/10")
+      // println(s"finishing greedy*: ${covers.size}/${maxCovers} ${iteration}/${maxIterations} ${lastChange}/10")
       return covers.reverse.toSeq
     }
 

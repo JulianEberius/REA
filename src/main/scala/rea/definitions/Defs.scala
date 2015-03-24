@@ -10,6 +10,7 @@ import scala.reflect.{ClassTag, classTag}
 import org.apache.commons.math3.stat.descriptive.SummaryStatistics
 import com.google.common.net.InternetDomainName
 import com.google.gson.Gson
+import com.google.gson.GsonBuilder
 import com.google.gson.annotations.SerializedName
 import com.google.common.collect.Sets
 import rea.cover.{ResultScorer, DistanceMeasure}
@@ -18,11 +19,30 @@ import rea.knowledge.Domains
 import rea.util.analyzedJavaSet
 import rea.util.javaSet
 import rea.util.splitURL
-import de.tudresden.matchtools.similarities._
+import rea.util.{Predicate, IsNumericPredicate}
 import webreduce.typing.DataType
+import webreduce.data.TableType
+import de.tudresden.matchtools.similarities._
+import java.lang.{Double => JDouble}
+import com.google.gson.JsonSerializer
+import java.lang.reflect.Type
+import com.google.gson.JsonSerializationContext
+import com.google.gson.JsonPrimitive
+import com.google.gson.JsonElement
+import java.math.BigDecimal
 
 object JSONSerializable {
-  val gson = new Gson
+  class DoubleSerializer extends JsonSerializer[JDouble] {
+      override def serialize(src:JDouble, typeOfSrc:Type, context: JsonSerializationContext):JsonElement = {
+          val value = BigDecimal.valueOf(src)
+          new JsonPrimitive(value.toPlainString())
+      }
+  }
+  val gsonBuilder = new GsonBuilder()
+  // TODO: why was this added?
+  // gsonBuilder.registerTypeAdapter(classOf[JDouble], new DoubleSerializer());
+
+  val gson  = gsonBuilder.create()
   def fromJson[C: ClassTag](t: Class[C], s: String): C = {
     JSONSerializable.gson.fromJson(s, classTag[C].runtimeClass)
   }
@@ -34,11 +54,40 @@ trait JSONSerializable {
   }
 }
 
+//[u'keyword', u'local_table', u'str_col_names', u'max_cands', u'col_names', u'columns']
+class DrillbeyondRequest extends JSONSerializable {
+  @SerializedName("columns") var columns: Array[Array[String]] = null
+  @SerializedName("keyword") var keyword: String = null
+  @SerializedName("max_cands") var max_cands: Int = 0
+  @SerializedName("local_table") var concept: String = null
+  @SerializedName("str_col_names") var col_names: Array[String] = null
+  @SerializedName("restrictions") var restrictions: Array[String] = null
+
+  def toREARequest(numResults:Int=max_cands, entityTables:Boolean=false) =
+    new REARequest(Array(concept), columns(0), Array(keyword), numResults, entityTables, restrictions)
+}
+
 class REARequest(val concept: Array[String], val entities: Array[String], val attribute: Array[String],
-    val numResults: Int, val entityTables: Boolean = true) extends JSONSerializable {
+    val numResults: Int, val entityTables: Boolean = true,
+    val predicateStrings:Array[String] = Array()) extends JSONSerializable {
+
   @transient
-  val termSet = analyzedJavaSet(
+  lazy val termSet = analyzedJavaSet(
     entities.flatMap(_.split(" ")), attribute.flatMap(_.split(" ")), concept)
+
+  @transient
+  lazy val ACTermSet = analyzedJavaSet(
+    attribute.flatMap(_.split(" ")), concept)
+
+  @transient
+  lazy val predicates:Seq[Predicate] = predicateStrings.map(Predicate.fromString(_)).toSeq
+
+  override def toString() = s"REARequest<concept: ${concept.mkString(",")} entities: ${entities.take(5).mkString(",")}... attribute: ${attribute.mkString(",")} numResults: $numResults entityTables: $entityTables predicates: ${predicates}>"
+}
+
+class RESRequest(val concept: String, val attributes: Array[String], val seed: Array[String], val numResults: Int) extends JSONSerializable {
+  @transient
+  val termSet = analyzedJavaSet(attributes.flatMap(_.split(" ")), seed, List(concept))
 }
 
 class REAContinueRequest(val handle: Int, val numResults: Int) extends JSONSerializable
@@ -46,6 +95,8 @@ class REAContinueRequest(val handle: Int, val numResults: Int) extends JSONSeria
 class REATermFrequencyRequest(val term: String) extends JSONSerializable
 
 class READatasetRequest(val url: String) extends JSONSerializable
+
+class REAEntitySearchRequest(val concept: String, val attributes: Array[String], val seed: Array[String] = Array(), val numResults: Int) extends JSONSerializable
 
 case class MatchInfo(attCol: Int, attRow:Int, attributeContext: String)
 
@@ -61,7 +112,10 @@ case class DrilledDataset(
   @transient
   lazy val stats = {
     val s = new SummaryStatistics()
-    values.foreach(v => s.addValue(v.value))
+    values.foreach(_.value match {
+	    case d:java.lang.Double => s.addValue(d)
+	    case _ =>
+    })
     s
   }
 
@@ -76,6 +130,8 @@ case class DrilledDataset(
     else
       analyze(attr)
   }
+
+  lazy val isNumeric = IsNumericPredicate().applicable(values.map(_.value))
 
   @transient lazy val urlTags = Sets.intersection(dataset.urlTermSet, DrilledDataset.possibleTags)
   @transient lazy val titleTags = Sets.intersection(dataset.titleTermSet, DrilledDataset.possibleTags)
@@ -133,9 +189,9 @@ object DrilledDataset {
     val dNorm = domainPopularityNormalizer(domainPopularityScores.min, domainPopularityScores.max)
 
     val preNormalized = results.map(_ match {
-      case DrilledDataset(req, dataset, v, DrillScores(a, e, c, tr, t, ca, cb, dp, sc, inhSc), mi) =>
+      case DrilledDataset(req, dataset, v, DrillScores(a, e, c, tr, t, ca, cb, dp, ps, sc, inhSc), mi) =>
         DrilledDataset(req, dataset, v, DrillScores.create(
-          a, e, c, tr / maxTermSim, t / maxTitleSim, ca, cb, dNorm(dp)), mi)
+          a, e, c, tr / maxTermSim, t / maxTitleSim, ca, cb, dNorm(dp), ps), mi)
     })
 
     val scores = preNormalized.map(_.scores.score)
@@ -145,9 +201,9 @@ object DrilledDataset {
     val isNorm = scoreNormalizer(inherentScores.min, inherentScores.max)
 
     val result = preNormalized.map(_ match {
-      case DrilledDataset(req, dataset, v, DrillScores(a, e, c, tr, t, ca, cb, dp, sc, inhSc), mi) =>
+      case DrilledDataset(req, dataset, v, DrillScores(a, e, c, tr, t, ca, cb, dp, ps, sc, inhSc), mi) =>
         DrilledDataset(req, dataset, v, DrillScores(
-          a, e, c, tr, t, ca, cb, dp, sNorm(sc), isNorm(inhSc)), mi)
+          a, e, c, tr, t, ca, cb, dp, ps, sNorm(sc), isNorm(inhSc)), mi)
     })
     result
   }
@@ -170,6 +226,7 @@ class Cover(val datasets: Seq[DrilledDataset], val datasetIndices:Seq[Int], val 
 
   val valSet = javaSet(picks.flatten)
   val valByEntity: Map[Int, DrilledValue] = picks.flatten.map(v => (v.forIndex,v)).toMap
+  val isNumeric = datasets.forall(_.isNumeric)
   // val valIdSet = {
   //   val result = new JBitSet()
   //   picks.flatten.foreach { v => result.set(v.globalId) }
@@ -251,13 +308,16 @@ class Cover(val datasets: Seq[DrilledDataset], val datasetIndices:Seq[Int], val 
   def toString(entities: Array[String]): String = {
     val sb = new mutable.StringBuilder()
     for ((ds, dsi) <- datasets.zipWithIndex) {
-      sb ++= s"From ${Console.RED}${ds.dataset.title}${Console.RESET} (${ds.dataset.tableNum}) ${Console.MAGENTA}${ds.inherentScore}${Console.RESET} with matchedAttr ${Console.GREEN}${ds.matchedAttribute}${Console.RESET}: ${ds.dataset.domain} ${ds.dataset.url}\n"
+      sb ++= s"From ${Console.RED}${ds.dataset.title}${Console.RESET} (${ds.dataset.tableNum}) ${Console.MAGENTA}${ds.inherentScore}${Console.RESET} with matchedAttr ${Console.GREEN}${ds.matchedAttribute}${Console.RESET}: ${ds.dataset.domain} ${ds.dataset.url} tableType: ${ds.dataset.tableType}\n"
       val v = picks(dsi)
       for (vv <- v) {
         sb ++= "    "
         sb ++= vv.toString(entities)
         sb ++= "\n"
       }
+      sb ++= "        "
+      sb ++= ds.scores.toString()
+      sb ++= "\n"
     }
     sb.toString()
   }
@@ -265,7 +325,7 @@ class Cover(val datasets: Seq[DrilledDataset], val datasetIndices:Seq[Int], val 
   override def toString(): String = {
     val sb = new mutable.StringBuilder()
     for (ds <- datasets) {
-      sb ++= s"From ${Console.RED}${ds.dataset.title}${Console.RESET} (${ds.dataset.tableNum}) ${Console.MAGENTA}${ds.inherentScore}${Console.RESET} with matchedAttr ${Console.GREEN}${ds.matchedAttribute}${Console.RESET}: ${ds.dataset.url}\n"
+      sb ++= s"From ${Console.RED}${ds.dataset.title}${Console.RESET} (${ds.dataset.tableNum}) ${Console.MAGENTA}${ds.inherentScore}${Console.RESET} with matchedAttr ${Console.GREEN}${ds.matchedAttribute}${Console.RESET}: ${ds.dataset.url} tableType: ${ds.dataset.tableType}\n"
     }
     sb.toString()
   }
@@ -302,7 +362,7 @@ object Cover {
 
 case class DrilledValue(
   forIndex: Int,
-  value: Double,
+  value: Object,
   @transient var dataset: Dataset,
   eColIdx: Int,
   eRowIdx: Int,
@@ -327,19 +387,24 @@ case class DrillScores(
   val coverageA: Double,
   val coverageB: Double,
   val domainPopularity: Double,
+  val predicateScore: Double,
   val score:Double,
   val inherentScore:Double) {
 
-  override def toString = s"""DrillScores A:$attSim E:$entitySim C:$conceptSim TR:$termSim TI:$titleSim COVA:$coverageA COVB:$coverageB DOMP:$domainPopularity SCORE:$score INH_SCORE:$inherentScore"""
+  override def toString = s"""DrillScores A:$attSim E:$entitySim C:$conceptSim TR:$termSim TI:$titleSim COVA:$coverageA COVB:$coverageB DOMP:$domainPopularity PRED:$predicateScore SCORE:$score INH_SCORE:$inherentScore"""
 }
 
 object DrillScores {
-  def create(attSim: Double, entitySim: Double, conceptSim: Double, termSim: Double, titleSim: Double, coverageA: Double, coverageB: Double, domainPopularity: Double) =
-    DrillScores(attSim, entitySim, conceptSim, termSim, titleSim, coverageA, coverageB, domainPopularity,
-      (attSim + entitySim * 0.9 + conceptSim * 0.01 + termSim * 0.01 + titleSim * 0.01 + coverageA + coverageB * 0.01  + domainPopularity * 0.5),
-      // temporarily changing inherentScore to mean the same as score
-      (attSim + entitySim * 0.9 + conceptSim * 0.01 + termSim * 0.01 + titleSim * 0.01 + coverageA + coverageB * 0.01 + domainPopularity * 0.5))
-      // (attSim + entitySim * 0.9 + conceptSim * 0.01 + termSim * 0.01 + titleSim * 0.01 +             coverageB * 0.01 + domainPopularity * 0.5))
+
+  def create(attSim: Double, entitySim: Double, conceptSim: Double, termSim: Double, titleSim: Double, coverageA: Double, coverageB: Double, domainPopularity: Double,
+    predicateScore: Double) = {
+
+    // temporarily changing inherentScore to mean the same as score
+    // temporarily increasing importance of predicateScore
+    val globalScore = (attSim + entitySim * 0.9 + conceptSim * 0.01 + termSim * 0.01 + titleSim * 0.01 + coverageA + coverageB * 0.01 + domainPopularity * 0.5 + predicateScore * 1.0)
+
+    DrillScores(attSim, entitySim, conceptSim, termSim, titleSim, coverageA, coverageB, domainPopularity, predicateScore, globalScore, globalScore)
+  }
 }
 
 class Dataset extends JSONSerializable {
@@ -347,6 +412,7 @@ class Dataset extends JSONSerializable {
   var relation: Array[Array[String]] = null
   var id: String = null
   var url: String = null
+  var pageTitle:String = null
   var hasHeader: Boolean = false
 
   var recordOfffset: Long = -1 // typo in original datasetst
@@ -354,6 +420,7 @@ class Dataset extends JSONSerializable {
   var recordEndOffset: Long = -1
   var tableNum: Int = -1
   var s3Link: String = null
+  var tableType: TableType = null
 
   var indexId: Int = -1
 
@@ -369,7 +436,7 @@ class Dataset extends JSONSerializable {
     result
   }
 
-  lazy val signature = this.title + ":" + this.tableNum
+  lazy val signature = s3Link + ":" + recordOffset + ":" + this.tableNum
 
   @SerializedName("columnTypes") var raw_columnTypes: Array[String] = null
   @SerializedName("domain") var raw_domain: String = null
@@ -420,7 +487,12 @@ class Dataset extends JSONSerializable {
 
   @transient lazy val title = raw_title match {
     case s: String => s
-    case null => url
+    case null => {
+      if (pageTitle != null)
+        pageTitle
+      else
+        url
+    }
   }
 
   def prettyColumns(cols: Seq[Int], n: Int = Integer.MAX_VALUE) {

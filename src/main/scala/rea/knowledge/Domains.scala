@@ -148,4 +148,17 @@ object Domains {
   }
 
 
+  def main(args: Array[String]) {
+    val x = new URI("https://www.peter.de/onsd/Fsa?sf=we2")
+    val y = x.getHost
+    val z = y.lastIndexOf('.')
+    val result = y.lastIndexOf('.', z-1) match {
+      case -1 => y
+      case k => y.substring(k+1)
+    }
+    println(result)
+//    println(query("wikipedia.org/").rank)
+//    println(query("mongabay.com/").rank)
+//    println(query("wikirating.org/").rank)
+  }
 }
