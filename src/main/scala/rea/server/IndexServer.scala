@@ -116,7 +116,7 @@ object IndexServer {
         //    with ScoreWeighter
         //    with InverseSimDistance
         //    with ExponentialDiversityPicker
-        val algo = new GeneticSetCovererXE(drb_req.max_cands, coverableEntities, topResults, 10, 0.0,1.0)
+        val algo = new GeneticSetCovererQ(drb_req.max_cands, coverableEntities, topResults, 10, 0.0,1.0)
           with ResultScorer
           with ScoreWeighter
           with InverseSimDistance
