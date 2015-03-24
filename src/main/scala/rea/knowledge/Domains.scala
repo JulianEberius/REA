@@ -40,9 +40,9 @@ object Domains {
   protected val defaultResponseGroups = "Rank,LinksInCount,Categories,Keywords"
   protected val secretAccessKey:String = null
   protected val accessKeyId:String = null
-  
+
   if (secretAccessKey == null || accessKeyId == null)
-    throw new RuntimeException("secreAccessKey and accessKeyId need to be set in Domains.scala")
+    throw new RuntimeException("secreAccessKey and accessKeyId need to be set in Domains.scala before compiling")
 
   protected def getTimestampFromLocalTime(date: Date): String =
     format.format(date)
@@ -131,7 +131,7 @@ object Domains {
   def scoreOnly(ds:Dataset):Double = {
     if (secretAccessKey == null || accessKeyId  == null)
       return 1.0
-      
+
     val jedis = RedisConnector.getConn(Config.REDIS_DOMAINSCORE_DB)
 
     val score = jedis.get(ds.domain) match {

@@ -1,10 +1,12 @@
 REA
 ===
 
-Implementation for the paper "Top-k Entity Augmentation using Consistent Set Covering".
+Implementation for the paper ["Top-k Entity Augmentation using Consistent Set Covering" (pdf)](http://wwwdb.inf.tu-dresden.de/misc/publications/rea.pdf).
 The following instructions allow to reproduce the paper's results.
 
-Creating an index of **Package rea.scoring**: Contains scoring functions for data sources.the DWTC
+*Note*: A modified version of this was also used in the paper "DrillBeyond: Processing Multi-Result Open World SQL Queries". This version can be found in the branch "DrillBeyond".
+
+Creating an index of the DWTC
 -------------------------------
 
 Before you can use REA, you need to acquire a copy of the [Dresden Web Table Corpus](https://wwwdb.inf.tu-dresden.de/misc/dwtc/), and create an Lucene index over it.
@@ -24,7 +26,7 @@ You can use the [DWTC-Tools](https://github.com/JulianEberius/dwtc-tools) to per
     cd ..
 
     # create the index
-    java -cp dwtc-tools/target/dwtc-tools-1.0.0-jar-with-dependencies.jar webreduce.indexing.Indexer -s -r ./dwtc ./dwtc.lidx
+    java -cp dwtc-tools/target/dwtc-tools-*-jar-with-dependencies.jar webreduce.indexing.Indexer -s -r ./dwtc ./dwtc.lidx
 
 The DWTC plus Index will take > 150GB disk space. It is possible and recommended to place the Index on a different machine than the development machine (see Runtime requirements).
 
@@ -34,8 +36,8 @@ Compilation
 
 Compilation is done via Maven. Before you can start, you need to install two custom libraries into your local maven repository via "mvn install":
 
-1.) DWTC-Tools: Tools for working with the Dresden Web Table corpus https://github.com/JulianEberius/dwtc-tools . Should already be installed if you followed the above instructions for creating an index.
-2.) matchtools: Custom schema and instance matching library https://github.com/JulianEberius/dwtc-tools .
+1.) DWTC-Tools: Tools for working with the Dresden Web Table corpus. Should already be installed if you followed the above instructions for creating an index.
+2.) matchtools: Custom schema and instance matching library.
 
     git clone https://github.com/JulianEberius/matchtools.git
     cd matchtools
@@ -86,12 +88,12 @@ The code can be edited using the Scala IDE (for Eclipse) when using the "Maven I
 
 Points of interest:
 
-**File REA.scala**: Contains the web table retrieval and matching system that produces the candidates for the set cover algorithms.
-**Package rea.cover**: Contains the implementations of the set cover algorithms discussed in the paper.
-**Package rea.test**: Executable classes used in the evaluation. The file *AllInOneTestInverseSim.scala* shows how the matching system and the set covering algorithms are used in together.
-**Package rea.coherence**: Contains coherence/consistency measures for data sources.
-**Package rea.scoring**: Contains scoring functions for data sources.
-**Package rea.index**: Contains the code for working with local or remote Lucene indices and retrieving candidate web tables from them.
-**Package rea.definitions**: Classes representing basic concepts, such as dataset, value, cover, etc. and lots of utility functions for them.
-**Package rea.server**: Contains the IndexServer that makes DWTC Lucene indices available as an HTTP service.
+- **File REA.scala**: Contains the web table retrieval and matching system that produces the candidates for the set cover algorithms.
+- **Package rea.cover**: Contains the implementations of the set cover algorithms discussed in the paper.
+- **Package rea.test**: Executable classes used in the evaluation. The file *AllInOneTestInverseSim.scala* shows how the matching system and the set covering algorithms are used in together.
+- **Package rea.coherence**: Contains coherence/consistency measures for data sources.
+- **Package rea.scoring**: Contains scoring functions for data sources.
+- **Package rea.index**: Contains the code for working with local or remote Lucene indices and retrieving candidate web tables from them.
+- **Package rea.definitions**: Classes representing basic concepts, such as dataset, value, cover, etc. and lots of utility functions for them.
+- **Package rea.server**: Contains the IndexServer that makes DWTC Lucene indices available as an HTTP service.
 
